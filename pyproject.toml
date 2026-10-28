@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "basic-page"
+version = "0.1.0"
+description = ""
+authors = ["Winikka <winikkc@hsd.k12.or.us>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+pytest = "*"
+webcode-tk = "*"
+file-clerk = "*"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,169 @@
+name: Autograding Tests
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  run-autograding-tests:
+    name: Autograding Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Poetry
+        run: python -m pip install poetry
+
+      - name: Install project dependencies
+        run: poetry install --no-root
+
+      - name: Run tests
+        id: tests
+        continue-on-error: true
+        run: poetry run pytest --junitxml=pytest-results.xml
+
+      - name: Report results
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          results_path = Path("pytest-results.xml")
+          outcome = os.environ["TEST_OUTCOME"]
+
+          if not results_path.exists():
+              summary_path.write_text(
+                  "## Autograding results\n\n"
+                  "Tests did not run or did not produce a result file. "
+                  "Check the earlier workflow steps for the setup error.\n",
+                  encoding="utf-8",
+              )
+          else:
+              root = ET.parse(results_path).getroot()
+              cases = list(root.iter("testcase"))
+              per_file = {}
+              failures = []
+              skipped = []
+
+              for case in cases:
+                  name = f"{case.get('classname', '')}::{case.get('name', '')}"
+                  classname = case.get("classname", "")
+                  test_file = case.get("file")
+                  if test_file:
+                      file_name = Path(test_file).name
+                  else:
+                      module = next(
+                          (
+                              part
+                              for part in reversed(classname.split("."))
+                              if part.startswith("test_")
+                          ),
+                          classname.split(".")[0],
+                      )
+                      file_name = f"{module}.py"
+
+                  counts = per_file.setdefault(
+                      file_name, {"passed": 0, "failed": 0, "skipped": 0}
+                  )
+                  failure = case.find("failure")
+                  error = case.find("error")
+                  skip = case.find("skipped")
+
+                  if failure is not None or error is not None:
+                      result = failure if failure is not None else error
+                      details = result.get("message") or (result.text or "").strip()
+                      failures.append((name, details))
+                      counts["failed"] += 1
+                  elif skip is not None:
+                      skipped.append(name)
+                      counts["skipped"] += 1
+                  else:
+                      counts["passed"] += 1
+
+              passed = sum(counts["passed"] for counts in per_file.values())
+              failed = sum(counts["failed"] for counts in per_file.values())
+              skipped_count = sum(
+                  counts["skipped"] for counts in per_file.values()
+              )
+              total = passed + failed + skipped_count
+              proficiency_files = [
+                  counts
+                  for file_name, counts in per_file.items()
+                  if "proficiency" in file_name.lower()
+              ]
+
+              if outcome == "success" and total > 0 and passed == total:
+                  score = 4
+              elif proficiency_files and all(
+                  counts["failed"] == 0 and counts["skipped"] == 0
+                  for counts in proficiency_files
+              ):
+                  score = 3
+              elif total > 0 and passed * 2 >= total:
+                  score = 2
+              else:
+                  score = 1
+
+              all_passed = outcome == "success" and total > 0 and passed == total
+              lines = [
+                  "## Autograding results",
+                  "",
+                  "✅ All tests passed" if all_passed else "❌ Tests did not all pass",
+                  "",
+                  f"**Final score: {score} / 4**",
+                  "",
+                  "### Results by test file",
+                  "",
+                  "| Test file | Passed | Failed | Skipped |",
+                  "| --- | ---: | ---: | ---: |",
+              ]
+
+              for file_name, counts in sorted(per_file.items()):
+                  lines.append(
+                      f"| `{file_name}` | {counts['passed']} | "
+                      f"{counts['failed']} | {counts['skipped']} |"
+                  )
+
+              lines.extend(
+                  [
+                      "",
+                      f"- Total passed: {passed}",
+                      f"- Total failed: {failed}",
+                      f"- Total skipped: {skipped_count}",
+                  ]
+              )
+
+              if failed:
+                  lines.extend(["", "### Failed tests"])
+                  for name, details in failures:
+                      lines.append(f"- `{name}`")
+                      if details:
+                          lines.append(f"  - {details.splitlines()[0]}")
+
+              if skipped:
+                  lines.extend(["", "### Skipped tests"])
+                  lines.extend(f"- `{name}`" for name in skipped)
+
+              if not cases:
+                  lines.extend(["", "No pytest test cases were collected."])
+
+              summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          if outcome != "success" or (
+              results_path.exists() and (failed or skipped_count or not cases)
+          ):
+              raise SystemExit(1)
+          PY
